@@ -190,6 +190,10 @@ def _cycle(p, theta, *, rtol=1e-7, max_step=1.0):
     high = [p["controllers"][x]["on"] for x in ("v", "l")]
     events, pieces = [], []
     cache = {"key": None, "eq": eq0}
+    fluid_capacity = total0 * abs(float(eq0.Cv()))
+    thermal_rate = theta * wall["Ki"] * (1 / wall["C"] + 1 / fluid_capacity)
+    thermal_rate += wall["Ko"] / wall["C"]
+    method = "LSODA" if thermal_rate * p["schedule"][-1]["until"] > 200 else "DOP853"
 
     def flash(y):
         key = tuple(y[:3])
@@ -198,16 +202,21 @@ def _cycle(p, theta, *, rtol=1e-7, max_step=1.0):
             cache["key"] = key
         return cache["eq"]
 
-    def set_control(t, y, enabled, reason):
+    def set_control(t, y, enabled, reason, crossings=None):
         eq = flash(y)
         amounts = _phase(eq, float(sum(y[:2])))[:2]
         before = list(on)
+        crossings = {} if crossings is None else crossings
         for j in range(2):
             if not enabled[j]:
                 on[j] = False
-            elif on[j] and amounts[j] <= off[j] + 1e-8:
+            elif j in crossings:
+                # A directed event root supplies the crossing identity even
+                # if its reconstructed inventory rounds to the inner side.
+                on[j] = crossings[j]
+            elif on[j] and amounts[j] <= off[j]:
                 on[j] = False
-            elif not on[j] and amounts[j] >= high[j] - 1e-8:
+            elif not on[j] and amounts[j] >= high[j]:
                 on[j] = True
         changed = []
         for j in range(2):
@@ -227,15 +236,37 @@ def _cycle(p, theta, *, rtol=1e-7, max_step=1.0):
         )
 
     current = 0.0
+    pending = {}
     for segment in p["schedule"]:
         end = float(segment["until"])
         enabled = segment["enabled"]
-        set_control(current, state, enabled, "command")
-        while current < end - 1e-10:
+        set_control(current, state, enabled, "command", pending)
+        pending = {}
+        while current < end:
             mode = tuple(on)
+            phase_start = flash(state)
+            total_start = float(sum(state[:2]))
+            pure = [phase_start.gas is not None and not phase_start.liquids,
+                    phase_start.gas is None and bool(phase_start.liquids)]
+            pure_interval = list(pure)
+
+            def observe_phase(eq):
+                pure_interval[0] &= eq.gas is not None and not eq.liquids
+                pure_interval[1] &= eq.gas is None and bool(eq.liquids)
+
+            latest_close = {}
+            for j in range(2):
+                rate = segment["flow"][j]
+                if mode[j] and not mode[1-j] and pure[j] and rate > 0:
+                    # In a pure phase its inventory is total moles. Constant
+                    # withdrawal bounds its first off crossing by material
+                    # conservation, even if the other phase appears earlier.
+                    latest_close[j] = current + (total_start - off[j]) / rate
+            stop = min([end] + [t for t in latest_close.values() if current < t])
 
             def rhs(t, y):
                 eq = flash(y)
+                observe_phase(eq)
                 _, _, yp, xp, hv, hl = _phase(eq, float(sum(y[:2])))
                 fv = segment["flow"][0] if mode[0] and yp is not None else 0.0
                 fl = segment["flow"][1] if mode[1] and xp is not None else 0.0
@@ -252,7 +283,7 @@ def _cycle(p, theta, *, rtol=1e-7, max_step=1.0):
                 dy[8], dy[9], dy[10] = ev / scale, el / scale, qo / scale
                 return dy
 
-            watchers = []
+            watchers, watched_channels = [], []
             for j in range(2):
                 if not enabled[j]:
                     continue
@@ -260,16 +291,18 @@ def _cycle(p, theta, *, rtol=1e-7, max_step=1.0):
 
                 def watcher(t, y, index=j, threshold=target):
                     eq = flash(y)
+                    observe_phase(eq)
                     return _phase(eq, float(sum(y[:2])))[index] - threshold
 
                 watcher.terminal = True
                 watcher.direction = -1.0 if mode[j] else 1.0
                 watchers.append(watcher)
+                watched_channels.append(j)
             result = solve_ivp(
                 rhs,
-                (current, end),
+                (current, stop),
                 state,
-                method="DOP853",
+                method=method,
                 rtol=rtol,
                 atol=np.array([1e-9] * 3 + [1e-7] + [1e-9] * 7),
                 max_step=max_step,
@@ -279,13 +312,32 @@ def _cycle(p, theta, *, rtol=1e-7, max_step=1.0):
             if not result.success:
                 raise RuntimeError(result.message)
             next_time = float(result.t[-1])
-            pieces.append((current, next_time, result.sol, mode))
             state = result.y[:, -1]
-            if next_time <= current + 1e-11:
-                raise RuntimeError("nonadvancing control event")
+            pending = {
+                watched_channels[i]: not mode[watched_channels[i]]
+                for i, event_times in enumerate(result.t_events)
+                if len(event_times)
+            }
+            end_phase = flash(state)
+            observe_phase(end_phase)
+            pure_end = [end_phase.gas is not None and not end_phase.liquids,
+                        end_phase.gas is None and bool(end_phase.liquids)]
+            for j, bound in latest_close.items():
+                if pure_interval[j] and bound <= end and (
+                    next_time == bound or (pending.get(j) is False and pure_end[j])
+                ):
+                    # Use the conservation root, rather than testing whether a
+                    # reconstructed endpoint lies within a threshold tolerance.
+                    next_time = bound
+                    state = result.sol(bound)
+                    pending[j] = False
+            pieces.append((current, next_time, result.sol, mode))
+            if next_time < current or (next_time == current and not pending):
+                raise RuntimeError("nonadvancing control integration")
             current = next_time
-            if current < end - 1e-10:
-                set_control(current, state, enabled, "inventory")
+            if current < end and pending:
+                set_control(current, state, enabled, "inventory", pending)
+                pending = {}
                 if tuple(on) == mode:
                     raise RuntimeError("unresolved control event")
             if len(events) > 64:
@@ -293,21 +345,22 @@ def _cycle(p, theta, *, rtol=1e-7, max_step=1.0):
     # At the terminal boundary there is no next schedule iteration to perform
     # the right-continuous update. A threshold reached exactly there still
     # changes the physical switch and belongs in the event history.
-    set_control(current, state, p["schedule"][-1]["enabled"], "inventory")
+    set_control(current, state, p["schedule"][-1]["enabled"], "inventory", pending)
     # A request at final time uses the final active schedule and right-continuous mode.
     samples = []
     for t in p["times"]:
         matching = [
-            piece for piece in pieces if piece[0] - 1e-9 <= t <= piece[1] + 1e-9
+            piece for piece in pieces if piece[0] <= t <= piece[1]
         ]
         if not matching:
             y, mode = state, tuple(on)
         else:
             a, b, interpolation, mode = matching[-1]
             y = interpolation(min(max(float(t), a), b))
-        right_events = [event for event in events if abs(event["time"] - t) <= 1e-8]
-        mode = list(mode)
-        for event in right_events:
+        mode = [False, False]
+        for event in events:
+            if event["time"] > t:
+                break
             mode[0 if event["phase"] == "v" else 1] = event["after"]
         eq = flash(y)
         nv, nl, yp, xp, _, _ = _phase(eq, float(sum(y[:2])))
@@ -355,7 +408,7 @@ def solve(payload):
         # fixed relative perturbation.  Preserve the actual control branch,
         # allowing an interior one-sided stencil near a finite-time boundary.
         baseline = result
-        signature = _event_signature(baseline)
+        signature = _event_signature(baseline, payload)
         nominal_ki = float(payload["wall"]["Ki"])
         effective_ki = theta * nominal_ki
         cache = {effective_ki: baseline}
@@ -376,7 +429,7 @@ def solve(payload):
             candidate = cache[value]
             return (
                 candidate
-                if candidate is not None and _event_signature(candidate) == signature
+                if candidate is not None and _event_signature(candidate, payload) == signature
                 else None
             )
 
@@ -458,8 +511,13 @@ def solve(payload):
     return result
 
 
-def _event_signature(result):
-    return [(e["phase"], e["kind"], e["cause"]) for e in result["events"]]
+def _event_signature(result, payload):
+    boundaries = [segment["until"] for segment in payload["schedule"]]
+    return [
+        (e["phase"], e["kind"], e["cause"],
+         int(np.searchsorted(boundaries, e["time"], side="left")))
+        for e in result["events"]
+    ]
 
 
 def _response_values(result):

@@ -2,7 +2,7 @@
 
 低温分离试验需要比较乙烷—正戊烷混合物在降温、回温和分相采出周期中的产品组成与回收率。现有 thermo 工程能够计算单个状态的相平衡，请扩展为定容分离罐的完整周期计算：罐壁具有有限热容，气、液两路计量采出由各自的库存上下限控制，库存不足时停止、恢复后重新投入。程序应覆盖单相与两相之间的转换，返回指定时刻的状态、两路累计产品、开停事件和整体收支，并给出指定换热参数变化对最终回收量及事件时刻的响应。
 
-这是基于真实项目 thermo 0.6.1、提交 `4f51c4343773c8e50480b32eb81b014ae3945ebb` 的作者扩展需求，不是上游缺陷报告。原生 `FlashVL` 已经具有 TP、VU 闪蒸能力。依赖已离线安装；源码可以通过 Python 的 `thermo.__file__` 定位。公开的 `thermo_model.make_flasher()` 按冻结物性构造原生模型，允许直接使用 thermo 和 SciPy。新功能的入口在 `/app/src/candidate.py`，实现 `solve(payload)`，输入和返回值均为可 JSON 序列化的对象。可修改或新增 `/app/src` 下 Python 文件；`thermo_model.py` 和 `property_data.json` 定义本题固定模型，不得改变其物理含义。不要修改系统依赖。
+本题扩展 thermo 0.6.1 应用。在 `/app/src/candidate.py` 实现 `solve(payload)`，输入和返回值均为 JSON 兼容对象。可修改或新增 `/app/src` 下 Python 文件，直接使用已安装的 thermo 和 SciPy；`thermo_model.make_flasher()` 提供原生物性模型。`thermo_model.py` 和 `property_data.json` 的物理含义及系统依赖须保持不变。
 
 ## 1. 固定物理定义
 

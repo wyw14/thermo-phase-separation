@@ -1,4 +1,4 @@
-"""Author-only independent check: direct PR phase equations + RK45 integration.
+"""Independent check: direct PR phase equations and RK45 integration.
 
 This implementation never imports thermo or the reference solver.  It is used
 on strictly two-phase trajectories by default. The optional vapor continuation
@@ -103,17 +103,20 @@ def cycle(p, theta=1.0, max_step=0.5, rtol=2e-9, allow_vapor=False):
     y = y0
     thresholds = [p["controllers"][s] for s in ("v", "l")]
 
-    def update(t, y, commands, cause):
+    def update(t, y, commands, cause, triggered=None):
         q = equilibrium(y)
         nv = sum(y[:2]) * q[2]
         amount = [nv, sum(y[:2]) - nv]
         old = list(enabled_state)
+        triggered = {} if triggered is None else triggered
         for j in range(2):
             if not commands[j]:
                 enabled_state[j] = False
-            elif old[j] and amount[j] <= thresholds[j]["off"] + 1e-8:
+            elif j in triggered:
+                enabled_state[j] = triggered[j]
+            elif old[j] and amount[j] <= thresholds[j]["off"]:
                 enabled_state[j] = False
-            elif not old[j] and amount[j] >= thresholds[j]["on"] - 1e-8:
+            elif not old[j] and amount[j] >= thresholds[j]["on"]:
                 enabled_state[j] = True
         changed = []
         for j in range(2):
@@ -130,9 +133,11 @@ def cycle(p, theta=1.0, max_step=0.5, rtol=2e-9, allow_vapor=False):
                 )
         events.extend(sorted(changed, key=lambda e: (e["after"], e["phase"] != "v")))
 
+    at_boundary = {}
     for seg in p["schedule"]:
-        update(time, y, seg["enabled"], "command")
-        while time < seg["until"] - 1e-10:
+        update(time, y, seg["enabled"], "command", at_boundary)
+        at_boundary = {}
+        while time < seg["until"]:
             mode = tuple(enabled_state)
 
             def derivative(t, y):
@@ -155,7 +160,7 @@ def cycle(p, theta=1.0, max_step=0.5, rtol=2e-9, allow_vapor=False):
                     qo / 10000,
                 ]
 
-            watches = []
+            watches, channels = [], []
             for j in range(2):
                 if not seg["enabled"][j]:
                     continue
@@ -169,6 +174,7 @@ def cycle(p, theta=1.0, max_step=0.5, rtol=2e-9, allow_vapor=False):
                 watch.terminal = True
                 watch.direction = -1 if mode[j] else 1
                 watches.append(watch)
+                channels.append(j)
             out = solve_ivp(
                 derivative,
                 (time, seg["until"]),
@@ -184,19 +190,31 @@ def cycle(p, theta=1.0, max_step=0.5, rtol=2e-9, allow_vapor=False):
                 raise RuntimeError(out.message)
             new = float(out.t[-1])
             pieces.append((time, new, out.sol, mode))
+            at_boundary = {
+                channels[i]: not mode[channels[i]]
+                for i, located in enumerate(out.t_events)
+                if len(located)
+            }
+            if new < time or (new == time and not at_boundary):
+                raise RuntimeError("independent event integration did not advance")
             time = new
             y = out.y[:, -1]
-            if time < seg["until"] - 1e-10:
-                update(time, y, seg["enabled"], "inventory")
-    update(time, y, p["schedule"][-1]["enabled"], "inventory")
+            if time < seg["until"]:
+                previous = tuple(enabled_state)
+                update(time, y, seg["enabled"], "inventory", at_boundary)
+                at_boundary = {}
+                if tuple(enabled_state) == previous:
+                    raise RuntimeError("independent event did not change control")
+    update(time, y, p["schedule"][-1]["enabled"], "inventory", at_boundary)
     samples = []
     for t in p["times"]:
-        a, b, interp, mode = [s for s in pieces if s[0] - 1e-8 <= t <= s[1] + 1e-8][-1]
+        a, b, interp, mode = [s for s in pieces if s[0] <= t <= s[1]][-1]
         yy = interp(t)
-        mode = list(mode)
+        mode = [False, False]
         for event in events:
-            if abs(event["time"]-t) <= 1e-8:
-                mode[0 if event["phase"] == "v" else 1] = event["after"]
+            if event["time"] > t:
+                break
+            mode[0 if event["phase"] == "v" else 1] = event["after"]
         T, P, beta, x, yp, lp, vp = equilibrium(yy)
         nt = sum(yy[:2])
         samples.append(

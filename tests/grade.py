@@ -23,7 +23,7 @@ LOGS = Path("/logs/verifier")
 EXPECTED_PHASES = [["setup", "passed"], ["call", "passed"], ["teardown", "passed"]]
 
 
-def atomic_write(path: Path, text: str) -> None:
+def atomic_write(path: Path, text: str, *, replace_link: bool = False) -> None:
     """Replace a root-owned result without exposing a partial or stale value."""
     descriptor, name = tempfile.mkstemp(prefix=".verifier-", dir=path.parent)
     temporary = Path(name)
@@ -31,11 +31,14 @@ def atomic_write(path: Path, text: str) -> None:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(text)
         temporary.chmod(0o600)
-        if path.exists():
-            if path.is_symlink() or not stat.S_ISREG(path.lstat().st_mode):
+        if path.is_symlink():
+            if not replace_link:
                 raise RuntimeError(
                     "Verifier output must be a regular file: " + str(path)
                 )
+        elif path.exists():
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise RuntimeError("Verifier output must be a regular file: " + str(path))
             # Docker Desktop maps mode 0444 to a Windows read-only attribute.
             path.chmod(0o600)
         os.replace(temporary, path)
@@ -58,7 +61,12 @@ def publish(record: dict) -> None:
 def initialize() -> None:
     """Reset reward atomically, including a reused read-only regular file."""
     LOGS.mkdir(parents=True, exist_ok=True)
+    alternate = LOGS / "reward.json"
+    # JSON has read priority. Publish zero there first so interruption while
+    # clearing old formats cannot expose an older successful text reward.
+    atomic_write(alternate, '{"reward":0}\n', replace_link=True)
     atomic_write(LOGS / "reward.txt", "0\n")
+    alternate.unlink()
 
 
 def contract() -> dict:
@@ -81,8 +89,7 @@ def prepare(workspace: Path) -> None:
     record = {"verifier_version": "pytest-cli-v2", "reward": 0, "timed_out": False}
     state = {"started_monotonic": time.monotonic(), "record": record}
     try:
-        LOGS.mkdir(parents=True, exist_ok=True)
-        atomic_write(LOGS / "reward.txt", "0\n")
+        initialize()
         if os.geteuid() != 0:
             raise RuntimeError(
                 "Verifier requires root bootstrap; candidate runs as uid 65534"

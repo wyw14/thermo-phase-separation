@@ -357,6 +357,108 @@ def test_terminal_inventory_event_is_right_continuous():
     assert got["events"][-1]["time"] == pytest.approx(20.0, rel=0, abs=0.03)
 
 
+def pure_vapor_payload(end=20.0):
+    """Single-vapor removal gives the independent identity N=10-0.1t."""
+    return {
+        "operation": "simulate",
+        "initial": {"T": 380.0, "P": 1e6, "z": [0.5, 0.5], "N": 10.0, "Tw": 380.0},
+        "wall": {"C": 600.0, "Ki": 20.0, "Ko": 0.0},
+        "controllers": {"v": {"off": 8.0, "on": 9.0}, "l": {"off": 0.2, "on": 0.5}},
+        "schedule": [{"until": end, "ambient": 380.0, "flow": [0.1, 0.0], "enabled": [True, False]}],
+        "times": [0.0, end],
+        "response": False,
+    }
+
+
+def test_subthreshold_initial_inventory_does_not_open():
+    """库存达到on才开启；等温闭罐的10 mol严格低于开启门时始终关闭。"""
+    payload = pure_vapor_payload()
+    payload["controllers"]["v"]["on"] = 10.0 + 5e-9
+    payload["schedule"][0]["flow"] = [0.0, 0.0]
+    got = run_candidate(payload)
+    assert got["events"] == []
+    assert [sample["on"] for sample in got["samples"]] == [[False, False]] * 2
+    assert [sample["Nv"] for sample in got["samples"]] == pytest.approx([10.0, 10.0], rel=3e-4, abs=3e-4)
+    assert got["samples"][-1]["product_v"] == pytest.approx([0.0, 0.0], rel=0, abs=3e-4)
+
+
+def test_inventory_just_above_off_at_terminal_remains_open():
+    """库存下降到off才关闭；独立N=10-0.1t给出尚未到门的终点。"""
+    end = (10.0 - (8.0 + 5e-9)) / 0.1
+    got = run_candidate(pure_vapor_payload(end))
+    assert [(event["kind"], event["cause"]) for event in got["events"]] == [("open", "command")]
+    assert got["samples"][-1]["on"] == [True, False]
+    assert got["samples"][-1]["Nv"] == pytest.approx(10.0 - 0.1 * end, rel=3e-4, abs=3e-4)
+
+
+def test_sample_sides_of_inventory_event_are_causal():
+    """请求时刻恰等于事件时右连续；事件之前的请求不能借用未来开停状态。"""
+    payload = pure_vapor_payload(21.0)
+    payload["times"] = [0.0, 20.0 - 5e-9, 20.0, 20.0 + 5e-9, 21.0]
+    got = run_candidate(payload)
+    assert [sample["on"] for sample in got["samples"]] == [
+        [True, False], [True, False], [False, False], [False, False], [False, False]
+    ]
+    assert [(event["kind"], event["cause"]) for event in got["events"]] == [
+        ("open", "command"), ("close", "inventory")
+    ]
+    assert got["events"][-1]["time"] == pytest.approx(20.0, rel=0, abs=0.03)
+
+
+def test_inventory_crossing_at_command_boundary_uses_right_command():
+    """工况切换先使用右侧命令；纯气解析关闭根与禁用命令同刻时记录command。"""
+    payload = pure_vapor_payload()
+    payload["schedule"].append({"until": 21.0, "ambient": 380.0, "flow": [0.1, 0.0], "enabled": [False, False]})
+    payload["times"] = [0.0, 20.0 - 5e-9, 20.0, 21.0]
+    got = run_candidate(payload)
+    assert [(event["kind"], event["cause"]) for event in got["events"]] == [
+        ("open", "command"), ("close", "command")
+    ]
+    assert got["events"][-1]["time"] == pytest.approx(20.0, rel=0, abs=0.03)
+    assert [sample["on"] for sample in got["samples"]] == [
+        [True, False], [True, False], [False, False], [False, False]
+    ]
+
+
+def test_fast_wall_exchange_matches_independent_isochoric_energy_limit():
+    """有限壁热容与流体内能守恒；强传热的闭罐终态由独立定容PR能量平衡给出。"""
+    from scipy.optimize import brentq
+    from independent_pr import DATA as properties, R
+
+    composition = np.array([0.5, 0.5])
+    initial = phase(380.0, 1e6, composition, "v")
+    molar_volume = initial["v"]
+    tc = np.asarray(properties["Tcs"])
+    pc = np.asarray(properties["Pcs"])
+    omega = np.asarray(properties["omegas"])
+    kappa = 0.37464 + 1.54226 * omega - 0.26992 * omega**2
+    ac = 0.4572355289213822 * R**2 * tc**2 / pc
+    b = composition @ (0.07779607390388846 * R * tc / pc)
+
+    def pressure(temperature):
+        attraction = ac * (1 + kappa * (1 - np.sqrt(temperature / tc)))**2
+        a = float(composition @ np.sqrt(np.outer(attraction, attraction)) @ composition)
+        return R * temperature / (molar_volume - b) - a / (molar_volume**2 + 2*b*molar_volume - b*b)
+
+    def energy_balance(temperature):
+        fluid = 10.0 * phase(temperature, pressure(temperature), composition, "v")["u"]
+        return fluid + 600.0 * (temperature - 400.0) - 10.0 * initial["u"]
+
+    equilibrium_temperature = brentq(energy_balance, 380.0, 400.0, xtol=1e-10)
+    payload = pure_vapor_payload(2.0)
+    payload["initial"]["Tw"] = 400.0
+    payload["wall"]["Ki"] = 1e8
+    payload["schedule"][0].update(flow=[0.0, 0.0], enabled=[False, False])
+    got = run_candidate(payload)
+    final = got["samples"][-1]
+    # Both positive heat capacities are finite. Ki=1e8 makes two seconds
+    # vastly longer than relaxation; the isolated equilibrium is the limit.
+    assert [final["T"], final["Tw"]] == pytest.approx([equilibrium_temperature]*2, rel=0, abs=0.03)
+    assert final["P"] == pytest.approx(pressure(equilibrium_temperature), rel=3e-4, abs=600)
+    assert final["U"] + 600.0 * (final["Tw"] - 400.0) == pytest.approx(got["initial_energy"], rel=0, abs=max(2.0, 3e-5*abs(got["initial_energy"])))
+    assert got["events"] == []
+
+
 @pytest.mark.parametrize("payload", invalid_requests())
 def test_public_invalid_input_errors(payload):
     """“非法结构、非正库存、无效阈值、非法时间序列或未知 operation 抛 `ValueError`” 九类真实无效输入。"""
@@ -393,6 +495,25 @@ def test_response_local_branch_and_scale_match_independent_derivative(boundary_i
     assert response["event_times"] == pytest.approx(
         wanted["event_times"], rel=0.03, abs=0.05
     ), f"{boundary_id}.event-time derivatives"
+
+
+def test_response_preserves_event_segment_when_enabled_flow_changes():
+    """固定其余输入的局部总导数；库存事件跨工况边界但身份不变也不能混用差分分支。"""
+    case = BOUNDARIES["near_terminal"]
+    payload = copy.deepcopy(case["input"])
+    boundary = payload["schedule"][0]["until"]
+    payload["schedule"].append({"until": 33.0, "ambient": 250.0, "flow": [0.12, 0.0], "enabled": [True, False]})
+    payload["times"] = [0.0, boundary, 33.0]
+    # Nominal extraction already stopped before the new command. Locally it
+    # remains stopped, so later commanded flow cannot alter product derivatives.
+    assert case["independent"]["events"][-1]["time"] < boundary
+    got = run_candidate(payload, timeout=180)
+    assert [(event["kind"], event["cause"]) for event in got["events"]] == [("open", "command"), ("close", "inventory")]
+    assert got["events"][-1]["time"] < boundary
+    wanted = case["response"]
+    assert got["response"]["product_v"] == pytest.approx(wanted["product_v"], rel=0.03, abs=0.0003)
+    assert got["response"]["product_l"] == pytest.approx(wanted["product_l"], rel=0.03, abs=0.0003)
+    assert got["response"]["event_times"] == pytest.approx(wanted["event_times"], rel=0.03, abs=0.05)
 
 
 @pytest.mark.parametrize("T,P,z,N,kind", SINGLE_PHASE)
@@ -504,6 +625,17 @@ def test_fixed_simultaneous_commands_zero_flow_and_response():
     assert got["response"]["product_v"] == pytest.approx([0.0, 0.0], rel=0, abs=0.0003)
     assert got["response"]["product_l"] == pytest.approx([0.0, 0.0], rel=0, abs=0.0003)
     assert got["response"]["event_times"] == pytest.approx([0.0]*4, rel=0, abs=0.05)
+
+
+def test_samples_immediately_before_command_boundary_keep_left_mode():
+    """工况切换使用右侧命令；边界前后的独立请求时刻保留各自真实开停状态。"""
+    payload = command_only_payload()
+    payload["times"] = [0.0, 1.0 - 5e-9, 1.0, 1.0 + 5e-9, 3.0]
+    got = run_candidate(payload, timeout=180)
+    assert [sample["on"] for sample in got["samples"]] == [
+        [False, True], [False, True], [True, False], [True, False], [True, True]
+    ]
+    assert [sample["time"] for sample in got["samples"]] == pytest.approx(payload["times"], rel=0, abs=1e-10)
 
 
 def test_dynamic_requests_reset_phase_switches_and_products():
