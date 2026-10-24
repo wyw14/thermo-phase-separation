@@ -68,23 +68,26 @@
     "test_outputs.py::test_phase_transition_keeps_selective_products_and_moving_event_response"
   ],
   "test_files_sha256": {
-    "candidate_proxy.py": "3fb68da87d134f679db0d99b2fa860c9334b5e6908d9973ab7bb7353942e55c1",
+    "candidate_proxy.py": "3cfb0e0f10156c1111215a6f81414f5e327e8dc1fad0fa84bd54ed2fb74f8182",
     "candidate_sandbox.py": "96aa485b07dd831c95183bd7ecd550ce1e7662e8ce07be88d20179e547fb65d3",
     "candidate_worker.py": "457480dd33b840c1ac129366bc37a4996151b1a7326a17a71d6f9cfb252e16a7",
     "data/cycles.json": "7375f53266c0a3652aba9555be44565856f67e1fd7e6e55ad87e136762d5d7bb",
     "data/property_data.json": "98d8a47002dcc6aaf6dc0fecb04def8927a0b018ff575ccc6d39b36b0a0bdf07",
     "data/response_boundaries.json": "74ae5b9099315f1ac8555707a3a503dbcdd1627a07c7c8a9427b1ffa3ffe8f28",
-    "grade.py": "434d8a3309c98ceeb4d171c77b1101bfc516d481efe107859a063c1e150f314e",
+    "grade.py": "272e07a64fd106d448db3bef9c7e13e3272abafccb02e42c2c5c81cc5ba4e082",
     "independent_cycle.py": "d53991cb313b940bcbaf7b2676a582d1c3f992bea8538dc7bf55e3b04261bf99",
     "independent_pr.py": "58654deed7639fa2df4aebe7b96f51bd939bbbdaf472fdba58ecef5092ed6d3e",
     "pytest.ini": "1c4ea57d78b41c8cdb046467d2069100704adaadfd72025e54ea5c0e1010092c",
     "requirements-test.txt": "512657e574994ee3094aa35f5482cce0d052c589d6ad049e69836bbc9d939695",
-    "test.sh": "b64a1a19b5c75bdc1d20ab3839469b3685c9fd00d17e1c9b89d552fda7165dc2",
+    "test.sh": "0c7142955af9e4b9e0169865423447848be331b395ba8b430be1038f968d6ab3",
     "test_outputs.py": "3b5c530a7916164e3c47d14f16713331d2dc3307ce2e171bff40731ade953904",
-    "trusted_runner.py": "c155fca30a759ae96dea144804370e97c51b1686fbbc747c1ecf5e69caa9fe27",
+    "trusted_runner.py": "287391d671105943bb77fdc5be203cccd6d9792f00744019a31661ea521cc610",
     "wheels-sha256.txt": "5449bf76235bdd76ddc6a5dae7db6cb9436e22ea692007be30e491f2b5822c35",
     "wire_codec.py": "3d61ba0574574b7bbe36dfc26ffa0e57b4d94b16b78c3e91b24c64ffa343e7dc",
     "data/phase_withdrawal.json": "44fe4b08a5262750f470cab03e16e34556c55e34e6f5dfe42b52b9ccb578d076",
-    "runtime_root.py": "409e8b4435704a8167e202708dd1d1418784eee1afc0a2741acae203164f182f"
+    "runtime_root.py": "409e8b4435704a8167e202708dd1d1418784eee1afc0a2741acae203164f182f",
+    "scoring.py": "17603d46a2dec7086ff66155ecdc611c9b7adc714a396b7caea1ccbe39aaf5f0",
+    "runtime_observations.py": "b13e1c00bf0955ff91342e18c45027ad92a122af7b5eae839215ad946359023b",
+    "scoring.json": "db23e77a6b0b48580382f779c4716b7e247cc3e9f867fd64334727eaa1e0a41f"
   }
 }
